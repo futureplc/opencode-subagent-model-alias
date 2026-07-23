@@ -37,12 +37,12 @@ Register the folder path with options in `opencode.json` (relative paths resolve
       "models": [
         {
           "name": "terra",
-          "model": "yourprovider/terra",
+          "model": "openai/gpt-5.6-terra",
           "when": "Deep reasoning, complex analysis, security-sensitive reviews."
         },
         {
           "name": "luna",
-          "model": "openai/gpt-5.5-luna",
+          "model": "openai/gpt-5.6-luna",
           "when": "Fast mechanical tasks: renames, sweeps, formatting, lookups."
         }
       ]
