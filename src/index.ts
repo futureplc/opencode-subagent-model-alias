@@ -4,14 +4,14 @@
  *
  * Hook flow:
  *   tool.definition     — documents the @alias convention on the task tool
- *   tool.execute.before — strips the suffix, records the pending dispatch
+ *   tool.execute.before — strips the suffix, annotates the description, records the pending dispatch
  *   chat.message        — matches the child's first message (parentage, agent,
  *                         title) and rewrites its model; consumes the dispatch
  *   tool.execute.after  — warns in the task output if the swap never happened
  *
- * The model choice lives only in plugin memory. Nothing is written into
- * prompts: task args can get persisted into the parent's transcript, and the
- * main agent learns to imitate any in-band marker.
+ * The full model reference is appended to the aliased task description, which
+ * persists in the parent task history. The model choice otherwise lives only
+ * in plugin memory.
  *
  * See README.md for design notes and caveats.
  */
@@ -155,8 +155,12 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
       const match = output.args.subagent_type?.match(aliasPattern)
       if (!match) return
       const agent = match[1]!
+      const entry = byName.get(match[2]!)!
       // Mutate properties only — replacing output.args is ignored by the core.
       output.args.subagent_type = agent
+      if (typeof output.args.description === "string") {
+        output.args.description = output.args.description ? `${output.args.description} (${entry.model})` : `(${entry.model})`
+      }
       pending.set(input.callID, {
         callID: input.callID,
         parentID: input.sessionID,
@@ -164,7 +168,7 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
         // Matches the task tool's child session title. Assumes subagent_type is
         // exactly the resolved agent's registry name (agent lookup is exact-match).
         title: `${output.args.description} (@${agent} subagent)`,
-        entry: byName.get(match[2]!)!,
+        entry,
         created: now,
         consumed: false,
         background: output.args.background === true,
@@ -192,9 +196,9 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
               `${matches.length} concurrent dispatches to "${matches[0]!.agent}" are indistinguishable (same parent and description) — applying the oldest`,
               "warn",
             )
-          const item = matches[0]! // Map iteration order → oldest first
-          applyModel(output.message, item.entry)
-          item.consumed = true
+            const item = matches[0]! // Map iteration order → oldest first
+            applyModel(output.message, item.entry)
+            item.consumed = true
           // Background dispatches get no receipt check, so the entry is done.
           if (item.background) pending.delete(item.callID)
           remember(input.sessionID, item.entry)

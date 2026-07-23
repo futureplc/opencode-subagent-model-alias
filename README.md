@@ -13,7 +13,7 @@ Aliases map to an allow-list of models in your config, so there's no need for cu
 Four hooks around a normal task dispatch:
 
 - `tool.definition` — adds the `@alias` convention and your per-model guidance to the task tool description.
-- `tool.execute.before` — strips the suffix so the real agent resolves, and records the dispatch (parent session, agent, expected child session title, model) in plugin memory.
+- `tool.execute.before` — strips the suffix so the real agent resolves, annotates the task description with the full configured model reference (for example, `Audit auth (openai/gpt-5.6-terra)`), and records the dispatch (parent session, agent, expected child session title, model) in plugin memory. This visible annotation persists in the parent task history.
 - `chat.message` — matches the child session's first message against a recorded dispatch (direct child of the dispatching session, expected agent and title) and rewrites the message's model before it is saved — the same mechanism `/model` uses. Follow-up messages stay on the swapped model.
 - `tool.execute.after` — if the swap never happened, appends a warning to the task output.
 

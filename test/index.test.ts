@@ -26,10 +26,10 @@ async function makePlugin(options: unknown = OPTIONS) {
   return { hooks, toasts, logs, sessions }
 }
 
-function taskArgs(subagent_type: string, description = "do it", prompt = "do the thing") {
+function taskArgs(subagent_type: string, description: unknown = "do it", prompt = "do the thing") {
   return { subagent_type, description, prompt } as {
     subagent_type: string
-    description: string
+    description: unknown
     prompt: string
     background?: boolean
   }
@@ -100,20 +100,37 @@ describe("tool.definition", () => {
 })
 
 describe("tool.execute.before", () => {
-  test("strips the alias and leaves the prompt untouched", async () => {
+  test("appends the full model reference to an aliased task description", async () => {
     const { hooks } = await makePlugin()
-    const { args } = await dispatch(hooks, taskArgs("review/security@terra"))
+    const { args } = await dispatch(hooks, taskArgs("review/security@terra", "Identify running model"))
     expect(args.subagent_type).toBe("review/security")
+    expect(args.description).toBe("Identify running model (yourprovider/terra)")
     expect(args.prompt).toBe("do the thing")
   })
 
-  test("ignores unconfigured aliases", async () => {
+  test("uses only the full model reference for an empty aliased description", async () => {
     const { hooks } = await makePlugin()
-    for (const subagent_type of ["review/security", "review/security@nope"]) {
-      const { args } = await dispatch(hooks, taskArgs(subagent_type))
-      expect(args.subagent_type).toBe(subagent_type)
-      expect(args.prompt).toBe("do the thing")
-    }
+    const { args } = await dispatch(hooks, taskArgs("review/security@terra", ""))
+    expect(args.description).toBe("(yourprovider/terra)")
+  })
+
+  test("leaves a default-model task description unchanged", async () => {
+    const { hooks } = await makePlugin()
+    const { args } = await dispatch(hooks, taskArgs("review/security", "Identify running model"))
+    expect(args.description).toBe("Identify running model")
+  })
+
+  test("leaves an unknown-alias task description unchanged", async () => {
+    const { hooks } = await makePlugin()
+    const { args } = await dispatch(hooks, taskArgs("review/security@nope", "Identify running model"))
+    expect(args.description).toBe("Identify running model")
+  })
+
+  test("leaves a non-string aliased task description unchanged", async () => {
+    const { hooks } = await makePlugin()
+    const description = { task: "Identify running model" }
+    const { args } = await dispatch(hooks, taskArgs("review/security@terra", description))
+    expect(args.description).toBe(description)
   })
 })
 
@@ -121,7 +138,7 @@ describe("chat.message", () => {
   test("swaps the model for the matching child", async () => {
     const { hooks, sessions } = await makePlugin()
     await dispatch(hooks, taskArgs("review@terra"))
-    childSession(sessions, "child", "review")
+    childSession(sessions, "child", "review", "do it (yourprovider/terra)")
 
     const output = childMessage("child")
     await hooks["chat.message"]({ sessionID: "child", agent: "review" }, output)
@@ -129,12 +146,22 @@ describe("chat.message", () => {
     expect(output.parts[0].text).toBe("do the thing")
   })
 
+  test("swaps the model when the child title uses the rewritten description", async () => {
+    const { hooks, sessions } = await makePlugin()
+    await dispatch(hooks, taskArgs("review/security@terra", "Audit auth"))
+    childSession(sessions, "child", "review/security", "Audit auth (yourprovider/terra)")
+
+    const output = childMessage("child")
+    await hooks["chat.message"]({ sessionID: "child", agent: "review/security" }, output)
+    expect(output.message.model.modelID).toBe("terra")
+  })
+
   test("handles model ids containing slashes", async () => {
     const { hooks, sessions } = await makePlugin({
       models: [{ name: "deep", model: "openrouter/vendor/model-x" }],
     })
     await dispatch(hooks, taskArgs("agent@deep"))
-    childSession(sessions, "child", "agent")
+    childSession(sessions, "child", "agent", "do it (openrouter/vendor/model-x)")
 
     const output = childMessage("child")
     await hooks["chat.message"]({ sessionID: "child", agent: "agent" }, output)
@@ -176,8 +203,8 @@ describe("chat.message", () => {
     const { hooks, sessions } = await makePlugin()
     await dispatch(hooks, taskArgs("agent@terra", "task one"), "parent", "call-1")
     await dispatch(hooks, taskArgs("agent@luna", "task two"), "parent", "call-2")
-    childSession(sessions, "child-1", "agent", "task one")
-    childSession(sessions, "child-2", "agent", "task two")
+    childSession(sessions, "child-1", "agent", "task one (yourprovider/terra)")
+    childSession(sessions, "child-2", "agent", "task two (openai/gpt-5.5-luna)")
 
     // The second dispatch's child happens to message first.
     const second = childMessage("child-2")
@@ -192,9 +219,9 @@ describe("chat.message", () => {
   test("indistinguishable dispatches apply oldest-first with a warning", async () => {
     const { hooks, sessions, toasts } = await makePlugin()
     await dispatch(hooks, taskArgs("agent@terra"), "parent", "call-1")
-    await dispatch(hooks, taskArgs("agent@luna"), "parent", "call-2")
-    childSession(sessions, "child-a", "agent")
-    childSession(sessions, "child-b", "agent")
+    await dispatch(hooks, taskArgs("agent@terra"), "parent", "call-2")
+    childSession(sessions, "child-a", "agent", "do it (yourprovider/terra)")
+    childSession(sessions, "child-b", "agent", "do it (yourprovider/terra)")
 
     const first = childMessage("child-a")
     await hooks["chat.message"]({ sessionID: "child-a", agent: "agent" }, first)
@@ -203,14 +230,14 @@ describe("chat.message", () => {
 
     const second = childMessage("child-b")
     await hooks["chat.message"]({ sessionID: "child-b", agent: "agent" }, second)
-    expect(second.message.model.modelID).toBe("gpt-5.5-luna")
+    expect(second.message.model.modelID).toBe("terra")
   })
 
   test("consumed dispatches don't apply twice", async () => {
     const { hooks, sessions } = await makePlugin()
     await dispatch(hooks, taskArgs("review@terra"))
-    childSession(sessions, "child", "review")
-    childSession(sessions, "lookalike", "review")
+    childSession(sessions, "child", "review", "do it (yourprovider/terra)")
+    childSession(sessions, "lookalike", "review", "do it (yourprovider/terra)")
     await hooks["chat.message"]({ sessionID: "child", agent: "review" }, childMessage("child"))
 
     const output = childMessage("lookalike")
@@ -221,7 +248,7 @@ describe("chat.message", () => {
   test("follow-ups stay on the swapped model", async () => {
     const { hooks, sessions } = await makePlugin()
     await dispatch(hooks, taskArgs("review@terra"))
-    childSession(sessions, "child", "review")
+    childSession(sessions, "child", "review", "do it (yourprovider/terra)")
     await hooks["chat.message"]({ sessionID: "child", agent: "review" }, childMessage("child"))
 
     const followUp = childMessage("child", "resume: continue where you left off")
@@ -248,7 +275,7 @@ describe("tool.execute.after receipt check", () => {
   test("leaves the output alone when the swap was applied", async () => {
     const { hooks, sessions } = await makePlugin()
     await dispatch(hooks, taskArgs("review@terra"))
-    childSession(sessions, "child", "review")
+    childSession(sessions, "child", "review", "do it (yourprovider/terra)")
     await hooks["chat.message"]({ sessionID: "child", agent: "review" }, childMessage("child"))
 
     const output = { metadata: { sessionId: "child" }, output: "task result" }
@@ -259,7 +286,7 @@ describe("tool.execute.after receipt check", () => {
   test("no warning when a resume already runs the requested model", async () => {
     const { hooks, sessions } = await makePlugin()
     await dispatch(hooks, taskArgs("review@terra"), "parent", "call-1")
-    childSession(sessions, "child", "review")
+    childSession(sessions, "child", "review", "do it (yourprovider/terra)")
     await hooks["chat.message"]({ sessionID: "child", agent: "review" }, childMessage("child"))
     await hooks["tool.execute.after"](
       { tool: "task", sessionID: "parent", callID: "call-1" },
@@ -289,7 +316,7 @@ describe("tool.execute.after receipt check", () => {
     expect(output.output).toBe("task result")
 
     // The child's first message arrives afterwards and still swaps.
-    childSession(sessions, "child", "review")
+    childSession(sessions, "child", "review", "do it (yourprovider/terra)")
     const message = childMessage("child")
     await hooks["chat.message"]({ sessionID: "child", agent: "review" }, message)
     expect(message.message.model.modelID).toBe("terra")
