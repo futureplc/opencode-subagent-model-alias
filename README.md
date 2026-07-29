@@ -106,7 +106,9 @@ bun test
 bun run typecheck
 ```
 
-`bun test` runs `test/index.test.ts` against a harness that stubs the three client calls the plugin makes (`client.tui.showToast`, `client.app.log`, `client.session.get`) plus an in-memory session table to control parentage and titles, exercising every hook for real. Coverage includes: invalid and empty alias configuration; `tool.definition` scoping to the task tool only; description annotation for aliased, default, unknown-alias and non-string-description dispatches; model swapping including multi-slash model ids; no-swap cases for a different parent, a different agent and a title mismatch; concurrent and indistinguishable dispatches; consumed dispatches not reapplying; follow-up messages staying on the swapped model; and the `tool.execute.after` receipt check, including the background-dispatch and already-sticky-resume paths.
+`bun test` runs `test/index.test.ts` against a harness that stubs the three client calls the plugin makes (`client.tui.showToast`, `client.app.log`, `client.session.get`) plus an in-memory session table to control parentage and titles, exercising every hook for real. 
+
+Coverage includes: invalid and empty alias configuration; `tool.definition` scoping to the task tool only; description annotation for aliased, default, unknown-alias and non-string-description dispatches; model swapping including multi-slash model ids; no-swap cases for a different parent, a different agent and a title mismatch; concurrent and indistinguishable dispatches; consumed dispatches not reapplying; follow-up messages staying on the swapped model; and the `tool.execute.after` receipt check, including the background-dispatch and already-sticky-resume paths.
 
 `bun run typecheck` runs `tsc --noEmit` against `src` and `test`.
 
