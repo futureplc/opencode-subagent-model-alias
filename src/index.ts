@@ -191,14 +191,15 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
             )
           : []
         if (matches.length > 0) {
-          if (matches.length > 1)
+          if (matches.length > 1) {
             report(
-              `${matches.length} concurrent dispatches to "${matches[0]!.agent}" are indistinguishable (same parent and description) — applying the oldest`,
+              `${matches.length} concurrent dispatches to "${matches[0]!.agent}" are indistinguishable (same parent and description), applying the oldest`,
               "warn",
             )
-            const item = matches[0]! // Map iteration order → oldest first
-            applyModel(output.message, item.entry)
-            item.consumed = true
+          }
+          const item = matches[0]! // Map iteration order gives oldest first
+          applyModel(output.message, item.entry)
+          item.consumed = true
           // Background dispatches get no receipt check, so the entry is done.
           if (item.background) pending.delete(item.callID)
           remember(input.sessionID, item.entry)
