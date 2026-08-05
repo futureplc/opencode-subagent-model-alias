@@ -34,7 +34,7 @@ If a swap never happens, the child runs on the default model and the task tool's
 Clone the repository:
 
 ```sh
-git clone https://github.com/Iris314/opencode-subagent-model-alias
+git clone https://github.com/futureplc/opencode-subagent-model-alias
 ```
 
 ```text
