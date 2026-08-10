@@ -26,11 +26,12 @@ async function makePlugin(options: unknown = OPTIONS) {
   return { hooks, toasts, logs, sessions }
 }
 
-function taskArgs(subagent_type: string, description: unknown = "do it", prompt = "do the thing") {
-  return { subagent_type, description, prompt } as {
+function taskArgs(subagent_type: string, description: unknown = "do it", prompt = "do the thing", task_id?: string) {
+  return { subagent_type, description, prompt, task_id } as {
     subagent_type: string
     description: unknown
     prompt: string
+    task_id?: string
     background?: boolean
   }
 }
@@ -135,6 +136,18 @@ describe("tool.execute.before", () => {
 })
 
 describe("chat.message", () => {
+  test("applies the configured variant for the matching child", async () => {
+    const { hooks, sessions } = await makePlugin({
+      models: [{ name: "terra", model: "yourprovider/terra", variant: "high" }],
+    })
+    await dispatch(hooks, taskArgs("review@terra"))
+    childSession(sessions, "child", "review", "do it (yourprovider/terra, high)")
+
+    const output = childMessage("child")
+    await hooks["chat.message"]({ sessionID: "child", agent: "review" }, output)
+    expect(output.message.model.variant).toBe("high")
+  })
+
   test("swaps the model for the matching child", async () => {
     const { hooks, sessions } = await makePlugin()
     await dispatch(hooks, taskArgs("review@terra"))
@@ -259,6 +272,82 @@ describe("chat.message", () => {
     await hooks["chat.message"]({ sessionID: "unrelated" }, unrelated)
     expect(unrelated.message.model.modelID).toBe("original-model")
   })
+
+  test("applies a resumed alias variant by task_id despite a different description", async () => {
+    const { hooks, sessions } = await makePlugin({
+      models: [
+        { name: "first", model: "yourprovider/shared", variant: "first-variant" },
+        { name: "second", model: "yourprovider/shared", variant: "second-variant" },
+      ],
+    })
+    await dispatch(hooks, taskArgs("review@first", "initial task"), "parent", "call-1")
+    childSession(sessions, "child", "review", "initial task (yourprovider/shared, first-variant)")
+    await hooks["chat.message"]({ sessionID: "child", agent: "review" }, childMessage("child"))
+
+    await dispatch(hooks, taskArgs("review@second", "different resumed task", "continue", "child"), "parent", "call-2")
+    const resumed = childMessage("child", "continue")
+    await hooks["chat.message"]({ sessionID: "child", agent: "review" }, resumed)
+    expect(resumed.message.model.variant).toBe("second-variant")
+
+    const receipt = { metadata: { sessionId: "child" }, output: "task result" }
+    await hooks["tool.execute.after"]({ tool: "task", sessionID: "parent", callID: "call-2" }, receipt)
+    expect(receipt.output).toBe("task result")
+  })
+
+  test("clears the sticky variant when the resumed alias omits it", async () => {
+    const { hooks, sessions } = await makePlugin({
+      models: [
+        { name: "with-variant", model: "yourprovider/shared", variant: "high" },
+        { name: "without-variant", model: "yourprovider/shared" },
+      ],
+    })
+    await dispatch(hooks, taskArgs("review@with-variant", "initial task"), "parent", "call-1")
+    childSession(sessions, "child", "review", "initial task (yourprovider/shared, high)")
+    await hooks["chat.message"]({ sessionID: "child", agent: "review" }, childMessage("child"))
+
+    await dispatch(hooks, taskArgs("review@without-variant", "different resumed task", "continue", "child"), "parent", "call-2")
+    const resumed = childMessage("child", "continue")
+    await hooks["chat.message"]({ sessionID: "child", agent: "review" }, resumed)
+    expect(resumed.message.model.variant).toBeUndefined()
+  })
+
+  test("does not apply a task_id resume when its agent is unavailable", async () => {
+    const { hooks, sessions } = await makePlugin()
+    await dispatch(hooks, taskArgs("review@terra", "resume", "continue", "child"))
+    childSession(sessions, "child", "review", "resume (yourprovider/terra)")
+
+    const resumed = childMessage("child", "continue")
+    await hooks["chat.message"]({ sessionID: "child" }, resumed)
+    expect(resumed.message.model.modelID).toBe("original-model")
+  })
+
+  test("does not fall back to a title match when a direct resume candidate is invalid", async () => {
+    const { hooks, sessions } = await makePlugin()
+    await dispatch(hooks, taskArgs("impostor@terra", "resume", "continue", "incoming"), "parent", "call-1")
+    await dispatch(hooks, taskArgs("review@luna", "ordinary task"), "parent", "call-2")
+    childSession(sessions, "incoming", "review", "ordinary task (openai/gpt-5.5-luna)")
+
+    const incoming = childMessage("incoming")
+    await hooks["chat.message"]({ sessionID: "incoming", agent: "review" }, incoming)
+    expect(incoming.message.model.modelID).toBe("original-model")
+
+    childSession(sessions, "ordinary-child", "review", "ordinary task (openai/gpt-5.5-luna)")
+    const ordinaryChild = childMessage("ordinary-child")
+    await hooks["chat.message"]({ sessionID: "ordinary-child", agent: "review" }, ordinaryChild)
+    expect(ordinaryChild.message.model.modelID).toBe("gpt-5.5-luna")
+  })
+
+  test("does not apply a direct resume alias or title fallback when the child title names another agent", async () => {
+    const { hooks, sessions } = await makePlugin()
+    await dispatch(hooks, taskArgs("review@terra", "resume", "continue", "incoming"), "parent", "call-1")
+    await dispatch(hooks, taskArgs("review@luna", "ordinary task"), "parent", "call-2")
+    childSession(sessions, "incoming", "impostor", "ordinary task (openai/gpt-5.5-luna)")
+
+    const incoming = childMessage("incoming")
+    await hooks["chat.message"]({ sessionID: "incoming", agent: "review" }, incoming)
+
+    expect(incoming.message.model.modelID).toBe("original-model")
+  })
 })
 
 describe("tool.execute.after receipt check", () => {
@@ -303,6 +392,63 @@ describe("tool.execute.after receipt check", () => {
     const output = { metadata: { sessionId: "child" }, output: "task result" }
     await hooks["tool.execute.after"]({ tool: "task", sessionID: "parent", callID: "call-2" }, output)
     expect(output.output).toBe("task result")
+  })
+
+  test("warns when a sticky session has a different variant than the resumed alias", async () => {
+    const { hooks, sessions } = await makePlugin({
+      models: [
+        { name: "with-variant", model: "yourprovider/shared", variant: "high" },
+        { name: "without-variant", model: "yourprovider/shared" },
+      ],
+    })
+    await dispatch(hooks, taskArgs("review@with-variant"), "parent", "call-1")
+    childSession(sessions, "child", "review", "do it (yourprovider/shared, high)")
+    await hooks["chat.message"]({ sessionID: "child", agent: "review" }, childMessage("child"))
+    await hooks["tool.execute.after"](
+      { tool: "task", sessionID: "parent", callID: "call-1" },
+      { metadata: { sessionId: "child" }, output: "done" },
+    )
+
+    await dispatch(hooks, taskArgs("review@without-variant", "resume", "continue", "child"), "parent", "call-2")
+    const output = { metadata: { sessionId: "child" }, output: "task result" }
+    await hooks["tool.execute.after"]({ tool: "task", sessionID: "parent", callID: "call-2" }, output)
+    expect(output.output).toContain("WARNING")
+  })
+
+  test("reports a prior session selection when an unapplied alias has sticky state", async () => {
+    const { hooks, logs, sessions, toasts } = await makePlugin()
+    await dispatch(hooks, taskArgs("review@terra"), "parent", "call-1")
+    childSession(sessions, "child", "review", "do it (yourprovider/terra)")
+    await hooks["chat.message"]({ sessionID: "child", agent: "review" }, childMessage("child"))
+    await hooks["tool.execute.after"](
+      { tool: "task", sessionID: "parent", callID: "call-1" },
+      { metadata: { sessionId: "child" }, output: "done" },
+    )
+
+    await dispatch(hooks, taskArgs("review@luna", "resume", "continue", "child"), "parent", "call-2")
+    const output = { metadata: { sessionId: "child" }, output: "task result" }
+    await hooks["tool.execute.after"]({ tool: "task", sessionID: "parent", callID: "call-2" }, output)
+
+    expect(output.output).toContain("continued on its prior session selection")
+    expect(output.output).not.toContain("default")
+    expect(toasts.at(-1)?.message).toContain("continued on its prior session selection")
+    expect(toasts.at(-1)?.message).not.toContain("default")
+    expect(logs.at(-1)?.message).toContain("continued on its prior session selection")
+    expect(logs.at(-1)?.message).not.toContain("default")
+  })
+
+  test("reports a normal default selection when an unapplied alias has no sticky state", async () => {
+    const { hooks, logs, toasts } = await makePlugin()
+    await dispatch(hooks, taskArgs("review@terra"))
+    const output = { metadata: { sessionId: "child" }, output: "task result" }
+    await hooks["tool.execute.after"]({ tool: "task", sessionID: "parent", callID: "call-1" }, output)
+
+    expect(output.output).toContain("used its normal/default selection")
+    expect(output.output).not.toContain("prior session selection")
+    expect(toasts.at(-1)?.message).toContain("used its normal/default selection")
+    expect(toasts.at(-1)?.message).not.toContain("prior session selection")
+    expect(logs.at(-1)?.message).toContain("used its normal/default selection")
+    expect(logs.at(-1)?.message).not.toContain("prior session selection")
   })
 
   test("keeps background dispatches pending for a late first message", async () => {

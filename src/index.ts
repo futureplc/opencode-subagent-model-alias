@@ -26,6 +26,8 @@ type ModelEntry = {
   name: string
   /** Full model reference, "provider/model-id". */
   model: string
+  /** Optional model variant. */
+  variant?: string
   /** Guidance for the agent on when to pick this model. */
   when?: string
 }
@@ -39,6 +41,8 @@ type PendingDispatch = {
   agent: string
   /** Expected child session title; tells same-turn dispatches apart. */
   title: string
+  /** Existing child session resumed by this task call, when supplied. */
+  resumeSessionID?: string
   entry: ModelEntry
   created: number
   consumed: boolean
@@ -127,8 +131,7 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
     const model = message.model as UserMessage["model"] & { variant?: string }
     model.providerID = providerID
     model.modelID = modelID
-    // A variant computed for the original model may not exist on the target.
-    model.variant = undefined
+    model.variant = entry.variant
   }
 
   return {
@@ -159,7 +162,9 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
       // Mutate properties only — replacing output.args is ignored by the core.
       output.args.subagent_type = agent
       if (typeof output.args.description === "string") {
-        output.args.description = output.args.description ? `${output.args.description} (${entry.model})` : `(${entry.model})`
+        output.args.description = output.args.description
+          ? `${output.args.description} (${entry.model}${entry.variant ? `, ${entry.variant}` : ""})`
+          : `(${entry.model}${entry.variant ? `, ${entry.variant}` : ""})`
       }
       pending.set(input.callID, {
         callID: input.callID,
@@ -168,6 +173,7 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
         // Matches the task tool's child session title. Assumes subagent_type is
         // exactly the resolved agent's registry name (agent lookup is exact-match).
         title: `${output.args.description} (@${agent} subagent)`,
+        resumeSessionID: typeof output.args.task_id === "string" ? output.args.task_id : undefined,
         entry,
         created: now,
         consumed: false,
@@ -177,19 +183,36 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
 
     "chat.message": async (input, output) => {
       prune(Date.now())
-      const unconsumed = [...pending.values()].filter(
-        (item) => !item.consumed && (input.agent === undefined || input.agent === item.agent),
-      )
+      const unconsumed = [...pending.values()].filter((item) => !item.consumed)
       if (unconsumed.length > 0) {
         const session = await getSessionInfo(input.sessionID)
-        // A dispatch is only honored in a direct child of the dispatching
-        // session with the expected agent and title. Re-check consumed: an
-        // interleaved message may have consumed an entry during the lookup.
-        const matches = session?.parentID
-          ? unconsumed.filter(
-              (item) => !item.consumed && item.parentID === session.parentID && item.title === session.title,
+        const resumeCandidates = unconsumed.filter((item) => item.resumeSessionID === input.sessionID)
+        let matches: PendingDispatch[] = []
+        if (session?.parentID) {
+          if (resumeCandidates.length > 0) {
+            // A resume is only honored for the exact child session, from the
+            // resolved agent, and under the original dispatching parent.
+            matches = resumeCandidates.filter(
+              (item) =>
+                !item.consumed &&
+                input.agent === item.agent &&
+                item.parentID === session.parentID &&
+                session.title?.endsWith(` (@${item.agent} subagent)`),
             )
-          : []
+          } else {
+            // A new child is only honored with the expected agent and title.
+            // Re-check consumed: an interleaved message may have consumed an
+            // entry during the lookup.
+            matches = unconsumed.filter(
+              (item) =>
+                !item.consumed &&
+                item.resumeSessionID === undefined &&
+                (input.agent === undefined || input.agent === item.agent) &&
+                item.parentID === session.parentID &&
+                item.title === session.title,
+            )
+          }
+        }
         if (matches.length > 0) {
           if (matches.length > 1) {
             report(
@@ -223,14 +246,18 @@ export const SubagentModelAlias: Plugin = async ({ client }, options) => {
       if (item.background) return
       pending.delete(input.callID)
       if (item.consumed) return
-      // A task_id resume of a session already sticky on the requested model ran
-      // correctly even though nothing was newly applied.
+      // A task_id resume of a session already sticky on the requested model
+      // and variant ran correctly even though nothing was newly applied.
       const childID = (output.metadata as { sessionId?: string } | undefined)?.sessionId
-      if (childID && sticky.get(childID)?.model === item.entry.model) return
+      const remembered = childID ? sticky.get(childID) : undefined
+      if (remembered?.model === item.entry.model && remembered.variant === item.entry.variant) return
+      const selection = remembered
+        ? "this task continued on its prior session selection"
+        : "this task used its normal/default selection"
       const warning =
-        `[subagent-model-alias] WARNING: the model swap to ${item.entry.model} (@${item.entry.name}) was never applied — ` +
-        `this task ran on the DEFAULT model. Report this to the user; do not assume the requested model was used.`
-      report(`swap to ${item.entry.model} (@${item.entry.name}) was never applied — task ran on the default model`, "warn")
+        `[subagent-model-alias] WARNING: the requested alias ${item.entry.model} (@${item.entry.name}) was never applied — ` +
+        `${selection}. Report this to the user; do not assume the requested model or variant was used.`
+      report(`swap to ${item.entry.model} (@${item.entry.name}) was never applied — ${selection}`, "warn")
       if (typeof output.output === "string") output.output = `${warning}\n\n${output.output}`
     },
   }
