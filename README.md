@@ -41,6 +41,11 @@ git clone https://github.com/futureplc/opencode-subagent-model-alias
 opencode-subagent-model-alias/
 ├── src/
 │   └── index.ts          # plugin entry, single file
+├── skills/
+│   └── subagent-model-alias-smoke-test/
+│       └── SKILL.md       # optional manual runtime verification
+├── scripts/
+│   └── install-smoke-test-skill.sh
 ├── test/
 │   └── index.test.ts     # bun:test suite
 ├── package.json
@@ -76,6 +81,24 @@ Register the folder path with options in `opencode.json` (relative paths resolve
 > Register the plugin only via this config entry. Don't also copy `src/index.ts` into an auto-discovery directory (`plugin/` next to your config): auto-discovered plugins load without options, and you'd end up with a second, non-functional instance.
 
 Requires opencode `>=1.17.18` (the `engines.opencode` floor in `package.json`). Runtime dependencies are `@opencode-ai/plugin` and `@opencode-ai/sdk`, both pinned to `^1.17.18`.
+
+### Optional Smoke-Test Skill
+
+The repository includes an opt-in `subagent-model-alias-smoke-test` skill for manually verifying that each configured alias dispatches a subagent on its expected model. It discovers aliases from the plugin-augmented `task` tool documentation and reports a `PASS` or `FAIL` for each one.
+
+After cloning the repository, install the skill into `~/.config/opencode/skills/` with:
+
+```sh
+./scripts/install-smoke-test-skill.sh
+```
+
+The installer replaces an existing copy of this same skill. To remove it, run:
+
+```sh
+./scripts/uninstall-smoke-test-skill.sh
+```
+
+The uninstaller removes this skill's `SKILL.md` and removes its directory only if it is empty, preserving any unrelated files there. Restart opencode after installing or uninstalling so it reloads the available skills. After installation, invoke it by asking opencode to run the subagent model alias smoke test. The skill dispatches one minimal native subagent per configured alias, so it makes real model calls.
 
 ## Options
 
