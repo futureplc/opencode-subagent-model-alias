@@ -13,17 +13,17 @@ Appending `@<alias>` to `subagent_type` runs that one dispatch on the aliased mo
 Four hooks around an ordinary task dispatch:
 
 1. `tool.definition` adds the `@alias` convention and your per-model guidance to the task tool's description, so the dispatching agent sees the available aliases and when to use them.
-2. `tool.execute.before` strips the `@alias` suffix so the real agent resolves normally, annotates the task description with the full configured model reference (for example, `Audit auth (openai/gpt-5.6-terra)`), and records the dispatch (parent session, agent, expected child session title, model) in plugin memory.
-3. `chat.message` matches the child session's first message against a recorded dispatch (direct child of the dispatching session, expected agent and title) and rewrites the message's model before it is saved. Follow-up messages on that session stay on the swapped model.
+2. `tool.execute.before` strips the `@alias` suffix so the real agent resolves normally, annotates the task description with the configured model and variant if present (for example, `Audit auth (openai/gpt-5.6-terra, medium)`), and records the dispatch (parent session, agent, expected child session title, optional resumed session ID, model) in plugin memory.
+3. `chat.message` matches a new child session against a recorded dispatch by parent, agent, and title. An aliased `task_id` resume instead matches that exact child session, while retaining the parent and agent checks. It rewrites the message's model and configured variant before it is saved. Follow-up messages on that session stay on the swapped model.
 4. `tool.execute.after` checks whether the recorded dispatch was consumed. If the swap never happened, it appends a warning to the task output.
 
 Because this rides an ordinary task dispatch, everything native keeps working: same-turn results, the task permission ask, `task_id` resume, background mode, child permissions.
 
 ### What You See
 
-Recorded task calls in your history show the bare `subagent_type`: the suffix is consumed during dispatch, so a missing `@alias` in your history means it was applied, not ignored. The task description carries the visible receipt instead, annotated with the full model reference, for example `Audit auth (openai/gpt-5.6-terra)`, and this annotation persists in the parent task history.
+Recorded task calls in your history show the bare `subagent_type`: the suffix is consumed during dispatch, so a missing `@alias` in your history means it was applied, not ignored. The task description carries the visible receipt instead, annotated with the configured model and variant, for example `Audit auth (openai/gpt-5.6-terra, medium)`, and this annotation persists in the parent task history.
 
-If a swap never happens, the child runs on the default model and the task tool's output is prefixed with a warning telling you to report it to the user and not assume the requested model ran.
+If a swap never happens, the task tool's output says whether it continued on its prior session selection (when sticky state exists) or used its normal/default selection (when it does not), and tells you not to assume the requested model ran.
 
 ## Why Hook the Native Task Tool
 
@@ -58,6 +58,7 @@ Register the folder path with options in `opencode.json` (relative paths resolve
         {
           "name": "terra",
           "model": "openai/gpt-5.6-terra",
+          "variant": "medium",
           "when": "Deep reasoning, complex analysis, security-sensitive reviews."
         },
         {
@@ -83,6 +84,7 @@ Requires opencode `>=1.17.18` (the `engines.opencode` floor in `package.json`). 
 | `models`         | array  | **Required.** Allow-list of models the agent may dispatch on. The plugin disables itself (with an error toast) if empty.         |
 | `models[].name`  | string | The `@alias`. Must start with a letter or digit; remaining characters may be letters, digits, `-` or `_`.                        |
 | `models[].model` | string | Full model reference, `provider/model-id`. Not validated by the plugin; a bad reference fails in opencode's provider resolution. |
+| `models[].variant` | string | Optional exact model variant for this alias. If omitted, the plugin clears the original message's variant. |
 | `models[].when`  | string | Routing guidance shown in the task tool description. Optional, but without it the agent has no basis for choosing.               |
 
 With the two aliases configured above, the dispatching agent can call:
@@ -91,7 +93,7 @@ With the two aliases configured above, the dispatching agent can call:
 task(subagent_type: "review/security@terra", description: "Audit auth", prompt: "...")
 ```
 
-This runs `review/security` on `openai/gpt-5.6-terra`, and the recorded task description becomes `Audit auth (openai/gpt-5.6-terra)`.
+This runs `review/security` on `openai/gpt-5.6-terra` with the `medium` variant, and the recorded task description becomes `Audit auth (openai/gpt-5.6-terra, medium)`. If an alias omits `variant`, the plugin sets the child message's variant to `undefined`, clearing any variant selected for the original model and displaying only the model on the description.
 
 ## Choosing Aliases
 
@@ -108,7 +110,7 @@ bun run typecheck
 
 `bun test` runs `test/index.test.ts` against a harness that stubs the three client calls the plugin makes (`client.tui.showToast`, `client.app.log`, `client.session.get`) plus an in-memory session table to control parentage and titles, exercising every hook for real. 
 
-Coverage includes: invalid and empty alias configuration; `tool.definition` scoping to the task tool only; description annotation for aliased, default, unknown-alias and non-string-description dispatches; model swapping including multi-slash model ids; no-swap cases for a different parent, a different agent and a title mismatch; concurrent and indistinguishable dispatches; consumed dispatches not reapplying; follow-up messages staying on the swapped model; and the `tool.execute.after` receipt check, including the background-dispatch and already-sticky-resume paths.
+Coverage includes: invalid and empty alias configuration; `tool.definition` scoping to the task tool only; description annotation for aliased, default, unknown-alias and non-string-description dispatches; model swapping, configured variants, omitted-variant clearing, and multi-slash model ids; direct `task_id` resume matching; no-swap cases for a different parent, a different agent and a title mismatch; concurrent and indistinguishable dispatches; consumed dispatches not reapplying; follow-up messages staying on the swapped model; and the `tool.execute.after` receipt check, including the background-dispatch and sticky-resume paths.
 
 `bun run typecheck` runs `tsc --noEmit` against `src` and `test`.
 
@@ -118,12 +120,12 @@ Coverage includes: invalid and empty alias configuration; `tool.definition` scop
 
 **Same-parent, same-agent, same-description dispatches are indistinguishable.** Two concurrent dispatches with the same parent, agent, and description can't be told apart; they're applied oldest-first with a warning toast. Distinct descriptions are unambiguous.
 
-**Resume matching is title-based.** Re-aliasing a `task_id` resume only applies when the call's `description` matches the child's original title; otherwise the session keeps its sticky model (quiet if that's already the requested model, warned otherwise).
+**Aliased `task_id` resumes are matched directly.** Direct `task_id` resume matching requires the exact child session ID, original parent, resolved agent, and the child title suffix `(@<agent> subagent)`. Re-aliasing a resume reapplies the selected alias's model and variant to that exact child session even when the new description differs. The resume still must originate from the original parent and resolve to the original agent.
 
 **The TUI header can lag.** It may briefly show the original model; the saved messages and all actual LLM calls use the swapped one.
 
 **State is in-memory.** Nothing survives a restart; a resumed child falls back to the default model afterwards. Sticky sessions are LRU-bounded at 500 entries, so a follow-up to an evicted session silently loses its swapped model too.
 
-**Swapping clears the message's model variant.** A variant valid on the original model may not exist on the target.
+**Variants must be configured per alias.** `models[].variant` is assigned exactly when present. When it is omitted, swapping clears the message's original variant because it may not exist on the target model.
 
 **Don't stack `@alias` plugins.** Running this alongside another plugin that also consumes an `@alias` suffix on the task tool's `subagent_type` isn't supported; the first plugin to strip it wins.
